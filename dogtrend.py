@@ -108,22 +108,22 @@ def parse_json_loose(text):
     return None
 
 
-def request_with_retry(method, url, **kw):
-    timeout = kw.pop("timeout", 90)
-    for attempt in range(5):
+def request_with_retry(method, url, retry_busy=True, **kw):
+    timeout = kw.pop("timeout", 60)
+    for attempt in range(4):
         try:
             r = requests.request(method, url, timeout=timeout, **kw)
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
-            if attempt < 4:
-                print(f"  ...connection pause, retrying ({attempt + 1}/4)...")
-                time.sleep(5 * (attempt + 1))
+            if attempt < 3:
+                time.sleep(2)
                 continue
             raise
-        if r.status_code in (429, 503) and attempt < 4:
-            wait = 10 * (attempt + 1)
-            print(f"  ...Google Free Tier is busy, pausing {wait}s for server queue to clear...")
-            time.sleep(wait)
-            continue
+        if r.status_code in (429, 503):
+            if not retry_busy:
+                return r  # Return immediately so caller can failover instantly
+            if attempt < 3:
+                time.sleep(2)
+                continue
         return r
     return r
 
@@ -181,11 +181,12 @@ def normalize_row(row):
     }
 
 
-def discover(con, topic, phrases):
+def discover(con, topic, phrases, limit=5):
     pages_budget = int(envnum("SC_MAX_CREDITS", 15))
-    per_phrase = max(1, pages_budget // max(1, len(phrases)))
+    search_phrases = phrases[:2] if len(phrases) > 2 else phrases
+    per_phrase = max(1, pages_budget // max(1, len(search_phrases)))
     total_new = 0
-    for ph in phrases:
+    for ph in search_phrases:
         print(f"  searching reels: {ph!r}")
         params = {
             "query": ph,
@@ -223,6 +224,8 @@ def discover(con, topic, phrases):
             )
             total_new += 1
         con.commit()
+        if total_new >= max(8, (limit or 5) * 2):
+            break
     print(f"  found {total_new} new reels")
     return total_new
 
@@ -245,7 +248,7 @@ def ff_post(path, payload):
     last = None
     for s in order:
         r = request_with_retry("POST", FF_BASE + path, json=payload,
-                               headers={**styles[s], "Content-Type": "application/json"}, timeout=300)
+                               headers={**styles[s], "Content-Type": "application/json"}, timeout=35)
         if r.status_code in (401, 403):
             last = r
             continue
@@ -354,8 +357,8 @@ def gemini(parts, system=None, json_mode=False, temperature=0.3):
     last_error = None
     for model in models_to_try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        r = request_with_retry("POST", url, json=body, headers={"x-goog-api-key": key,
-                                                                "Content-Type": "application/json"})
+        r = request_with_retry("POST", url, json=body, retry_busy=False,
+                               headers={"x-goog-api-key": key, "Content-Type": "application/json"})
         try:
             j = r.json()
         except ValueError:
@@ -363,9 +366,9 @@ def gemini(parts, system=None, json_mode=False, temperature=0.3):
             continue
 
         if r.status_code in (429, 503):
-            # Model cluster is busy, try next model in the pool
             last_error = f"Gemini {model} error {r.status_code}: {dig(j, 'error.message', 'busy')}"
-            print(f"  ...{model} experiencing high demand (503). Switching to alternate model...")
+            print(f"  ...{model} busy (503). Switching model in 2s...")
+            time.sleep(2)
             continue
 
         if r.status_code >= 400:
@@ -495,7 +498,7 @@ def process_single_reel_isolated(row):
         con.close()
 
 
-def process_reels_parallel(rows, max_workers=3, on_progress=None):
+def process_reels_parallel(rows, max_workers=4, on_progress=None):
     """Processes multiple reels concurrently using a thread pool."""
     if not rows:
         return
@@ -659,11 +662,10 @@ def cmd_run(args):
     phrases = make_phrases(topic)
     print("   ", phrases)
     print("2) Finding reels")
-    discover(con, topic, phrases)
-    limit = args.limit or int(envnum("MAX_REELS", 20))
+    discover(con, topic, phrases, limit=limit)
     todo = choose_reels(con, limit, topic=topic)
     print(f"3) Reading {len(todo)} reels in parallel (screenshots, transcript, on-screen text, AI notes)")
-    process_reels_parallel(todo, max_workers=3)
+    process_reels_parallel(todo, max_workers=4)
     print("4) Writing report")
     build_report(con, topic)
 

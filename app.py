@@ -149,7 +149,7 @@ with tab_run:
                 status_box.write("🔍 **Step 2/4:** Discovering Instagram reels...")
                 progress_bar.progress(35, text="Discovering reels on Instagram...")
                 try:
-                    found_count = dogtrend.discover(con, topic_input, phrases)
+                    found_count = dogtrend.discover(con, topic_input, phrases, limit=limit_input)
                     status_box.write(f"Found **{found_count}** new reels.")
                 except Exception as e:
                     status_box.write(f"⚠️ Search note: {e} (Continuing with discovered reels in database)")
@@ -168,7 +168,7 @@ with tab_run:
                         status_box.write(f"✓ Read {done}/{total}: `{url}`")
                         progress_bar.progress(55 + int(30 * (done / total)), text=f"Read {done}/{total} reels...")
 
-                    dogtrend.process_reels_parallel(todo, max_workers=3, on_progress=on_progress)
+                    dogtrend.process_reels_parallel(todo, max_workers=4, on_progress=on_progress)
 
                 # Stage 4: Writing report
                 status_box.write("📝 **Step 4/4:** Writing report and video scripts...")
